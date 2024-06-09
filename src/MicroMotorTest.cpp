@@ -1,5 +1,7 @@
 
 #include <Arduino.h>
+#include <pid.h>
+
 
 int LED_BUILTIN = 2;
 int encoder_left_a = 4;
@@ -23,8 +25,12 @@ bool encoder_right_b_changed = false;
 bool is_forwards = false;
 bool go_forwards = true;
 
-long previous_millis = 0;
-long interval = 500;  // interval at which to change motor direction (milliseconds)
+long previous_millis_pid = 0;
+long previous_millis_speed = 0;
+long previous_millis_serial = 0;
+long motor_control_interval = 100;        // interval at which to conduct PID on motors (milliseconds)
+long motor_change_speed_interval = 5000;   // interval at which to change motor speed for testing (milliseconds)
+long serial_print_interval = 500;
 
 int motor_control_left_a = 22;
 int motor_control_left_b = 23;
@@ -59,6 +65,26 @@ const int PULSES_PER_REV = 2940;
 
 float rpm_left = 0;
 float rpm_right = 0;
+
+
+/* Velocity */
+float target_speed = 0.0; // m/s
+float robot_speed = 0.0;  // m/s
+#define WHEEL_RADIUS 0.02    // m
+#define WHEEL_CIRCUMFERENCE (2 * PI * WHEEL_RADIUS);
+float left_wheel_speed = 0.0;
+float right_wheel_speed = 0.0;
+
+/* PID CONTROLLERS */
+PID leftMotorPID(10, 15, 14.5, 30, 255, 50); //Kp, Ki, Kd, min, max, integral_limit
+PID rightMotorPID(10, 13, 15, 30, 255, 50);
+//PID leftMotorPID(0.01, 1.5, 0.0145, 40, 255, 0.5); //Kp, Ki, Kd, min, max, integral_limit
+//PID rightMotorPID(0.01, 1.3, 0.015, 40, 255, 0.5);
+float left_target_vel = 0.05;    // target m/s = 5cm/s. max ~15cm/s
+float right_target_vel = 0.05;
+
+double speed_control_left = 0.0;
+double speed_control_right = 0.0;
 
 
 void IRAM_ATTR isrEncoderLeftAChange(){
@@ -98,6 +124,17 @@ void motorForwards(uint8_t dutyCycle){
   ledcAttach(motor_control_right_b, PWM_FREQ, PWM_RESOLUTION);
   ledcWrite(motor_control_right_b, dutyCycle);
   
+}
+
+void motorForwardsIndividualControl(uint8_t dutyCycleLeft, uint8_t dutyCycleRight){
+  // go forwards
+  ledcDetach(motor_control_left_b);
+  ledcAttach(motor_control_left_a, PWM_FREQ, PWM_RESOLUTION);
+  ledcWrite(motor_control_left_a, dutyCycleLeft);
+
+  ledcDetach(motor_control_right_a);
+  ledcAttach(motor_control_right_b, PWM_FREQ, PWM_RESOLUTION);
+  ledcWrite(motor_control_right_b, dutyCycleRight);
 }
 
 
@@ -142,9 +179,6 @@ void motorTest(){
 
   // turn off channel A
   ledcWrite(motor_control_left_a, 0);
-
-  // go backwards
-  ledcDetach(motor_control_left_a);
   ledcAttach(motor_control_left_b, PWM_FREQ, PWM_RESOLUTION);
   
   // fade up PWM on given channel
@@ -216,10 +250,24 @@ void setup() {
 void loop() {
 
   unsigned long current_millis = millis();
-  
-  if(current_millis - previous_millis > interval) {
+
+  if(current_millis - previous_millis_speed > motor_change_speed_interval) {
     
-    unsigned long time_difference_millis = current_millis - previous_millis;
+    if(left_target_vel == float(0.05)){
+      left_target_vel = 0.12;
+      right_target_vel = 0.12;
+    } else {
+      left_target_vel = 0.05;
+      right_target_vel = 0.05;
+    }
+
+    previous_millis_speed = current_millis;
+
+  }
+  
+  if(current_millis - previous_millis_pid > motor_control_interval) {
+    
+    unsigned long time_difference_millis = current_millis - previous_millis_pid;
     
     // calculate current rpm for left motor;
     float pulse_difference_left_a = pulse_count_left_a - previous_pulse_count_left_a;
@@ -233,33 +281,34 @@ void loop() {
     previous_pulse_count_right_b = pulse_count_right_b;
     rpm_right = ((pulse_difference_right_a/PULSES_PER_REV) / (float(time_difference_millis)/1000)) * 60;
 
-    previous_millis = current_millis;    
+    // turn rpm into velocity (m/s)
+    left_wheel_speed = (rpm_left / 60) * WHEEL_CIRCUMFERENCE;
+    right_wheel_speed = (rpm_right / 60) * WHEEL_CIRCUMFERENCE;
+
+    /**************
+    PID CONTROLLERS
+    **************/
+    speed_control_left = leftMotorPID.calculate(abs(left_wheel_speed), abs(left_target_vel), time_difference_millis);      // Calculate new value to write to left motor
+    speed_control_right = rightMotorPID.calculate(abs(right_wheel_speed), abs(right_target_vel), time_difference_millis);  // Calculate new value to write to right motor
+
+    motorForwardsIndividualControl((uint8_t)speed_control_left, (uint8_t)speed_control_right);
+    
+    previous_millis_pid = current_millis;    
   }
 
+  if(current_millis - previous_millis_serial > serial_print_interval) {
 
-  if(pulse_count_left_a % PULSES_PER_REV == 0 || pulse_count_left_b % PULSES_PER_REV == 0){
-    revolutions_left+=1;
-    Serial.print("A Pulse Count ");
-    Serial.print(pulse_count_left_a);
-    Serial.print("     B Pulse Count ");
-    Serial.print(pulse_count_left_b);
-    Serial.print("     Revolutions ");
-    Serial.print(revolutions_left);
-    Serial.print("     RPM Left ");
-    Serial.print(rpm_left);
-    Serial.print("     RPM Right ");
-    Serial.println(rpm_right);
+    Serial.print("L Wheel Sp ");
+    Serial.print(left_wheel_speed);
+    Serial.print("     L Wheel Sp ");
+    Serial.print(right_wheel_speed);
+    Serial.print("     L Wheel Sp Cn ");
+    Serial.print(speed_control_left);
+    Serial.print("     R Wheel Sp Cn ");
+    Serial.println(speed_control_right);
 
-    if(revolutions_left%4 == 0){
-      motorChangeDirection();
-    }
-    if(revolutions_left%20 == 0){
-      motorForwards(255);
-    } else if (revolutions_left%10 == 0) {
-      motorForwards(50);
-    }
-    //pulse_count_left_a = 0;
-    //pulse_count_left_b = 0;
+    previous_millis_serial = current_millis;
+
   }
 
 
